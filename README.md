@@ -79,7 +79,7 @@ src/
 ├── types.ts              # shared Level / note types
 └── index.css             # all styling
 public/
-├── logo.svg              # app logo
+├── logo.jpg              # app logo (original artwork)
 ├── covers/               # jacket art
 ├── levelinfo/            # chart files (SUS) + audio
 └── menumusic/            # level-list music
