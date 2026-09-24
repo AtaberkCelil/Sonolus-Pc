@@ -1,0 +1,10 @@
+node_modules/
+dist/
+menu/dist/
+.remember/
+.manus-logs/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example

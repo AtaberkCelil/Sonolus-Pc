@@ -1,0 +1,6 @@
+ID:531
+Actual Play Back Time: 126.1
+Note count: 440
+Base Score Rank: 1.059
+Fever Score Rank: 0.190
+Difficulty: 8

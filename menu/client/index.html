@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sonopc - Sonolus PC Player</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body, html { width: 100%; height: 100%; overflow: hidden; background: #0f0f1b; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #fff; }
+    #app { width: 100vw; height: 100vh; position: relative; }
+    canvas { display: block; width: 100%; height: 100%; }
+
+    /* Overlay UI */
+    .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; display: flex; flex-direction: column; justify: space-between; }
+    .interactive { pointer-events: auto; }
+
+    /* Menu Styling */
+    #menu { position: absolute; inset: 0; background: rgba(15, 15, 27, 0.95); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 10; gap: 20px; backdrop-filter: blur(10px); }
+    h1 { font-size: 3rem; background: linear-gradient(45deg, #ff007f, #00f0ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-weight: 900; letter-spacing: 2px; }
+
+    .card { background: #1a1a2e; border: 1px solid #2a2a4a; padding: 25px; border-radius: 12px; width: 450px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+    .btn-group { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 15px; }
+
+    button { background: #252545; color: #fff; border: 1px solid #3d3d6b; padding: 12px; border-radius: 8px; font-weight: bold; cursor: pointer; transition: all 0.2s; }
+    button:hover { background: #00f0ff; color: #000; border-color: #00f0ff; transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0, 240, 255, 0.4); }
+    button.selected { background: #ff007f; border-color: #ff007f; color: #fff; }
+
+    .play-btn { width: 100%; padding: 15px; background: linear-gradient(45deg, #ff007f, #7928ca); border: none; font-size: 1.2rem; margin-top: 20px; text-transform: uppercase; letter-spacing: 1px; }
+
+    /* HUD */
+    #hud { display: none; justify-content: space-between; padding: 20px 40px; font-size: 1.5rem; font-weight: bold; text-shadow: 0 0 10px rgba(0,240,255,0.8); }
+    .combo-display { position: absolute; top: 35%; left: 50%; transform: translate(-50%, -50%); text-align: center; pointer-events: none; }
+    .combo-num { font-size: 4rem; font-weight: 900; color: #fff; text-shadow: 0 0 20px #00f0ff; }
+    .judgment-text { font-size: 2rem; font-weight: 800; text-transform: uppercase; margin-top: -10px; }
+
+    .PERFECT { color: #ffe600; text-shadow: 0 0 15px #ffe600; }
+    .GREAT { color: #00f0ff; text-shadow: 0 0 15px #00f0ff; }
+    .GOOD { color: #00ff66; text-shadow: 0 0 15px #00ff66; }
+    .MISS { color: #ff0055; text-shadow: 0 0 15px #ff0055; }
+
+    .controls-hint { font-size: 0.9rem; color: #8888aa; margin-top: 15px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <canvas id="gameCanvas"></canvas>
+    <div class="overlay">
+      <!-- Menu -->
+      <div id="menu" class="interactive">
+        <h1>SONOPC</h1>
+        <div class="card">
+          <h2 id="songTitle">The Intense Voice of Hatsune Miku</h2>
+          <p id="songSub" style="color: #8888aa; margin-bottom: 15px;">CosMo@BousouP</p>
+
+          <label style="font-size: 0.9rem; color: #aaa;">SELECT DIFFICULTY:</label>
+          <div class="btn-group" id="diffGroup">
+            <button data-diff="easy">EASY</button>
+            <button data-diff="normal">NORMAL</button>
+            <button data-diff="hard">HARD</button>
+            <button data-diff="expert" class="selected">EXPERT</button>
+            <button data-diff="master" style="grid-column: span 2;">MASTER</button>
+          </div>
+
+          <div style="margin-top: 15px;">
+            <label style="font-size: 0.9rem; color: #aaa;">AUTO PLAY MODE:</label>
+            <input type="checkbox" id="autoPlay" checked style="margin-left: 10px; cursor: pointer;">
+          </div>
+
+          <button id="startBtn" class="play-btn">START GAME</button>
+
+          <div class="controls-hint">
+            Klavye: A S D F G H &middot; J K L &middot; ; ' \ &nbsp;|&nbsp; ya da şeride tıklayın
+          </div>
+
+          <div style="margin-top: 15px;">
+            <label style="font-size: 0.8rem; color: #aaa;">Import Custom Level Folder:</label>
+            <input type="file" id="folderInput" webkitdirectory directory style="display: none;">
+            <button id="importBtn" style="width: 100%; margin-top: 5px; font-size: 0.8rem;">Select Folder...</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- HUD -->
+      <div id="hud">
+        <div id="scoreDisplay">SCORE: 0000000</div>
+        <div id="accDisplay">100.00%</div>
+      </div>
+      <div class="combo-display" id="comboContainer" style="display: none;">
+        <div class="combo-num" id="comboNum">0</div>
+        <div style="font-size: 1rem; color: #aaa; letter-spacing: 3px;">COMBO</div>
+        <div class="judgment-text" id="judgmentText">PERFECT</div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
