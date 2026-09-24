@@ -97,11 +97,42 @@ menu/                     # original standalone PC player (legacy)
    (`PERFECT / GREAT / GOOD / MISS`), combo, score, accuracy, slide-tick combo events.
 3. **`PlayScreen.tsx`** fetches the chart, wires the HUD, and handles start → play → results.
 
-## ⚠️ Known limitations
+## 🎯 Chart accuracy
 
-- Slide ticks/end are judged as combo events once the slide head is hit — true hold/release detection is not implemented yet.
-- Charts come from the public `sekai.best` conversions; a few sections contain fewer notes than the in-game charts.
-- Guide channels (`9x`) are parsed but not rendered.
+Combo counts are **note-for-note identical to the reference converter**
+([UntitledCharts/sonolus-level-converters](https://github.com/UntitledCharts/sonolus-level-converters))
+on all 10 bundled charts — verified by running the reference loader against this parser:
+
+| Chart | Combo events | | Chart | Combo events |
+|---|---|---|---|---|
+| TIVoHM Easy | 409 | | Mesmerizer Easy | 271 |
+| TIVoHM Normal | 707 | | Mesmerizer Normal | 440 |
+| TIVoHM Hard | 963 | | Mesmerizer Hard | 761 |
+| TIVoHM Expert | 1520 | | Mesmerizer Expert | 1218 |
+| TIVoHM Master | 1742 | | Mesmerizer Master | 1451 |
+
+This required implementing the parts of the format that a naive parse drops:
+
+- **`long_continuations`** — every hold implicitly produces extra combo events on each
+  half-beat (240 ticks) until it ends. This is the single largest source of combo; without
+  it a chart like TIVoHM Hard reports 636 events instead of 963.
+- **Slide step types** — type `3` is a *visible* relay (adds combo), type `5` only changes
+  the trace shape (adds nothing), and type `3` marked as *step-ignore* becomes an `attach`.
+- **`judgeType`** — hidden holds (channel `1` types `7`/`8`) are not judged, and friction
+  slides (types `5`/`6`) are traced rather than tapped.
+- **Guide channels (`9x`)** are parsed and rendered as translucent guide paths
+  (yellow when critical, green otherwise). They are visual only and never add combo.
+
+## ✋ Hold & release detection
+
+Slides are real holds, not free combo:
+
+- The body must be **held** — at least one lane the trace passes through stays pressed.
+- **Releasing early** breaks the hold: the body turns red and the remaining
+  relay/continuation events are scored `MISS`, breaking the combo.
+- A small grace window (`RELEASE_GRACE`, 80 ms) at the end of the body forgives an
+  early release, and window blur is treated as a release so you never get stuck holding.
+- **Autoplay** satisfies every hold automatically.
 
 ## 🙏 Credits & licensing
 

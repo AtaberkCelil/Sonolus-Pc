@@ -1,4 +1,4 @@
-import { FlickDirection, Note, ParsedChart, LANE_COUNT } from './susParser';
+import { ComboEvent, FlickDirection, GuideNote, Note, ParsedChart, LANE_COUNT } from './susParser';
 
 type Judgment = 'PERFECT' | 'GREAT' | 'GOOD' | 'MISS';
 
@@ -7,6 +7,11 @@ const PERFECT_WINDOW = 0.06;
 const GREAT_WINDOW = 0.12;
 const GOOD_WINDOW = 0.18;
 const MISS_WINDOW = 0.2;
+/**
+ * Bırakma toleransı: slide gövdesi bu kadar saniye içinde bırakılırsa
+ * tutma kaybedilmez (oyundaki "grace" davranışı).
+ */
+const RELEASE_GRACE = 0.08;
 
 const JUDGMENT_WEIGHT: Record<Judgment, number> = { PERFECT: 1, GREAT: 0.7, GOOD: 0.4, MISS: 0 };
 
@@ -65,12 +70,26 @@ export class GameEngine {
   private maxCombo: number = 0;
   private judgedCount: number = 0;
   private weightSum: number = 0;
-  /** Baş vuruşu isabet mi oldu (MISS değil mi) — slide tikleri için. */
-  private headHit: boolean[] = [];
-  /** Combo olayları: slide görünür tikleri + bitişleri (referans: "adds combo"). */
-  private slideEvents: Array<{ parent: number; time: number; judged: boolean }> = [];
-  /** Toplam combo olayı = tekil notalar + slide tikleri + bitişler. */
-  private comboTotal: number = 0;
+  /**
+   * Tüm combo olayları (tekiller + slide start/relay/continuation/end).
+   * Referans `combo_events()` ile birebir aynı sırada ve içeriktedir.
+   */
+  private events: ComboEvent[] = [];
+  /** Çözülmüş combo olaylarının bayrakları. */
+  private eventJudged: boolean[] = [];
+  /** İlk çözülmemiş combo olayının indeksi (kuyruk imleci). */
+  private eventCursor: number = 0;
+  /** Kanal 9 guide varlıkları (görsel, puanlanmaz). */
+  private guides: GuideNote[] = [];
+  /**
+   * Aktif tutmalar: nota indeksi -> { hit, broken, releasedAt }.
+   * Slide gövdesi boyunca tuş basılı tutulmalıdır.
+   */
+  private holds = new Map<number, { hit: boolean; broken: boolean; releasedAt: number | null }>();
+  /** Fiziksel olarak basılı tutulan tuşlar (lane indeksi). */
+  private heldLanes = new Set<number>();
+  /** Fare/dokunma ile basılı tutulan şerit (aynı anda tek lane). */
+  private pointerHeldLane: number | null = null;
   /** Nota kayma hızı çarpanı — yalnızca görsel; yargılama ses saatine bağlıdır. */
   private noteSpeed: number = 1;
 
@@ -91,16 +110,45 @@ export class GameEngine {
     const lane = LANE_KEYS[event.code] as number | undefined;
     if (lane === undefined) return;
     event.preventDefault();
+    this.heldLanes.add(lane);
     if (this.isPlaying) this.triggerHit(lane);
   };
 
-  private handlePointerDown = (event: PointerEvent) => {
-    if (!this.isPlaying) return;
+  private handleKeyUp = (event: KeyboardEvent) => {
+    const lane = LANE_KEYS[event.code] as number | undefined;
+    if (lane === undefined) return;
+    event.preventDefault();
+    this.heldLanes.delete(lane);
+    this.onRelease();
+  };
+
+  /** Pencere odağını kaybedince basılı tuşlar "bırakılmış" sayılır. */
+  private handleBlur = () => {
+    this.heldLanes.clear();
+    this.pointerHeldLane = null;
+    this.onRelease();
+  };
+
+  private laneFromPointer(event: PointerEvent): number | null {
     const rect = this.canvas.getBoundingClientRect();
     const scaleX = this.canvas.width / rect.width;
     const x = (event.clientX - rect.left) * scaleX;
     const lane = Math.floor((x - this.fieldLeft) / this.laneWidth);
-    if (lane >= 0 && lane < LANE_COUNT) this.triggerHit(lane);
+    return lane >= 0 && lane < LANE_COUNT ? lane : null;
+  }
+
+  private handlePointerDown = (event: PointerEvent) => {
+    const lane = this.laneFromPointer(event);
+    if (lane === null) return;
+    this.pointerHeldLane = lane;
+    this.heldLanes.add(lane);
+    if (this.isPlaying) this.triggerHit(lane);
+  };
+
+  private handlePointerUp = () => {
+    if (this.pointerHeldLane !== null) this.heldLanes.delete(this.pointerHeldLane);
+    this.pointerHeldLane = null;
+    this.onRelease();
   };
 
   constructor(canvas: HTMLCanvasElement) {
@@ -137,6 +185,7 @@ export class GameEngine {
   public async loadLevel(chart: ParsedChart, audioSrc: string) {
     this.chart = chart;
     this.notes = chart.notes;
+    this.guides = chart.guides ?? [];
     this.judged = new Array(this.notes.length).fill(false);
     this.cursor = 0;
 
@@ -145,17 +194,15 @@ export class GameEngine {
     this.maxCombo = 0;
     this.judgedCount = 0;
     this.weightSum = 0;
-    this.headHit = new Array(this.notes.length).fill(false);
-    this.slideEvents = [];
+    this.events = chart.comboEvents ?? [];
+    this.eventJudged = new Array(this.events.length).fill(false);
+    this.eventCursor = 0;
+    this.holds.clear();
+    this.heldLanes.clear();
+    this.pointerHeldLane = null;
     this.notes.forEach((note, index) => {
-      if (note.endTime === undefined) return;
-      if (note.ticks) {
-        for (const t of note.ticks) this.slideEvents.push({ parent: index, time: t, judged: false });
-      }
-      this.slideEvents.push({ parent: index, time: note.endTime, judged: false });
+      if (note.type === 'slide') this.holds.set(index, { hit: false, broken: false, releasedAt: null });
     });
-    this.slideEvents.sort((a, b) => a.time - b.time);
-    this.comboTotal = this.notes.length + this.slideEvents.length;
     this.updateHud();
 
     if (this.audio) {
@@ -232,34 +279,90 @@ export class GameEngine {
 
   private setupInput() {
     window.addEventListener('keydown', this.handleKeyDown);
+    window.addEventListener('keyup', this.handleKeyUp);
+    window.addEventListener('blur', this.handleBlur);
     this.canvas.addEventListener('pointerdown', this.handlePointerDown);
+    window.addEventListener('pointerup', this.handlePointerUp);
+    window.addEventListener('pointercancel', this.handlePointerUp);
+  }
+
+  /**
+   * Bir tuş bırakıldığında, gövdesi henüz bitmemiş ve basılı tutulmayan
+   * hiçbir slide yoksa o tutmalar kırılır (combo bozulur).
+   */
+  private onRelease() {
+    if (!this.isPlaying) return;
+    if (this.autoPlay) return;
+    if (this.heldLanes.size > 0) return;
+    const songTime = this.getSongTime();
+    for (const [index, hold] of this.holds) {
+      if (hold.broken || hold.releasedAt !== null) continue;
+      const note = this.notes[index];
+      if (!note || note.endTime === undefined) continue;
+      // Bitişten RELEASE_GRACE kadar önce bırakıldıysa tutma kaybedilir
+      if (songTime >= note.endTime - RELEASE_GRACE) continue;
+      hold.releasedAt = songTime;
+      hold.broken = true;
+    }
+  }
+
+  /** Belirli bir lane basılı mı (fare + klavye birlikte). */
+  private isLaneHeld(lane: number): boolean {
+    return this.heldLanes.has(lane);
   }
 
   private triggerHit(lane: number) {
     const songTime = this.getSongTime();
-    let bestIndex = -1;
+    let bestEvent = -1;
     let bestDelta = Infinity;
 
-    for (let i = this.cursor; i < this.notes.length; i++) {
-      const note = this.notes[i];
-      const delta = note.time - songTime;
-      if (delta > GOOD_WINDOW) break;
-      if (this.judged[i] || note.lane !== lane) continue;
+    // Giriş gerektiren combo olaylarında en yakın eşleşme aranır
+    for (let i = this.eventCursor; i < this.events.length; i++) {
+      const event = this.events[i];
+      if (event.time > songTime + GOOD_WINDOW) break;
+      if (!event.input || this.eventJudged[i]) continue;
+      const note = this.notes[event.noteIndex];
+      if (!note) continue;
+      // Slide end/baş vuruşları: ilgili lane'e (veya gövde şeritlerine) basılmalı
+      const matches =
+        note.lane === lane ||
+        (note.type === 'slide' && (note.endLane === lane || this.laneTouchesSlide(note, lane)));
+      if (!matches) continue;
+      const delta = event.time - songTime;
       if (Math.abs(delta) < Math.abs(bestDelta)) {
         bestDelta = delta;
-        bestIndex = i;
+        bestEvent = i;
       }
     }
 
-    if (bestIndex < 0) return;
+    if (bestEvent < 0) return;
 
+    const event = this.events[bestEvent];
     const distance = Math.abs(bestDelta);
     const judgment: Judgment =
       distance <= PERFECT_WINDOW ? 'PERFECT' : distance <= GREAT_WINDOW ? 'GREAT' : 'GOOD';
-    this.judged[bestIndex] = true;
-    this.headHit[bestIndex] = true;
+    this.eventJudged[bestEvent] = true;
+    this.judged[event.noteIndex] = true;
+    if (event.kind === 'start') {
+      // Slide tutması başladı: gövde boyunca lane basılı tutulmalı
+      const hold = this.holds.get(event.noteIndex);
+      if (hold) {
+        hold.hit = true;
+        hold.broken = false;
+        hold.releasedAt = null;
+      }
+    }
     this.registerJudgment(judgment);
     this.advanceCursor(songTime);
+  }
+
+  /** Verilen lane, slide gövdesinin geçtiği şerit aralığına değiyor mu. */
+  private laneTouchesSlide(note: Note, lane: number): boolean {
+    if (!note.points || note.points.length === 0) return false;
+    for (const point of note.points) {
+      if (point.lane === lane) return true;
+    }
+    return false;
   }
 
   private registerJudgment(judgment: Judgment) {
@@ -273,7 +376,7 @@ export class GameEngine {
       this.maxCombo = Math.max(this.maxCombo, this.combo);
     }
 
-    const totalNotes = Math.max(this.comboTotal || this.notes.length, 1);
+    const totalNotes = Math.max(this.events.length || this.notes.length, 1);
     this.score = Math.round((this.weightSum / totalNotes) * 1000000);
 
     this.updateHud();
@@ -314,42 +417,108 @@ export class GameEngine {
   }
 
   private updateMisses(songTime: number) {
-    for (let i = this.cursor; i < this.notes.length; i++) {
-      const note = this.notes[i];
-      if (note.time > songTime + MISS_WINDOW) break;
-      if (this.judged[i]) continue;
-      if (note.time < songTime - MISS_WINDOW) {
-        this.judged[i] = true;
+    for (let i = this.eventCursor; i < this.events.length; i++) {
+      const event = this.events[i];
+      if (event.time > songTime + MISS_WINDOW) break;
+      if (this.eventJudged[i]) continue;
+      if (event.time < songTime - MISS_WINDOW) {
+        this.eventJudged[i] = true;
+        this.judged[event.noteIndex] = true;
+        // Bırakılmış slide gövdesi: kalan iç olaylar da kaçırılmış sayılır
+        if (event.hold) this.breakHold(event.noteIndex, songTime);
         this.registerJudgment('MISS');
       }
     }
+    this.advanceEventCursor();
     this.advanceCursor(songTime);
   }
 
+  /** Bir slide tutması kırıldıysa gövdesi kalan iç olaylar kaçırılmış işaretlenir. */
+  private breakHold(noteIndex: number, songTime: number) {
+    const hold = this.holds.get(noteIndex);
+    if (hold && !hold.broken) {
+      hold.broken = true;
+      hold.releasedAt = songTime;
+    }
+  }
+
+  private advanceEventCursor() {
+    while (this.eventCursor < this.events.length && this.eventJudged[this.eventCursor]) {
+      this.eventCursor++;
+    }
+  }
+
   private updateAutoPlay(songTime: number) {
-    for (let i = this.cursor; i < this.notes.length; i++) {
-      const note = this.notes[i];
-      if (note.time > songTime) break;
-      if (this.judged[i]) continue;
-      this.judged[i] = true;
-      this.headHit[i] = true;
+    for (let i = this.eventCursor; i < this.events.length; i++) {
+      const event = this.events[i];
+      if (event.time > songTime) break;
+      if (this.eventJudged[i]) continue;
+      this.eventJudged[i] = true;
+      this.judged[event.noteIndex] = true;
+      if (event.kind === 'start') {
+        const hold = this.holds.get(event.noteIndex);
+        if (hold) {
+          hold.hit = true;
+          hold.broken = false;
+        }
+      }
       this.registerJudgment('PERFECT');
     }
+    this.advanceEventCursor();
     this.advanceCursor(songTime);
   }
 
   /**
-   * Slide tikleri (tip 3) ve bitişleri ayrı combo olaylarıdır (referans loader: "adds combo").
-   * Baş vurulduysa tikler PERFECT, baş kaçtıysa MISS sayılır; baş çözülene kadar beklenir.
+   * Slide gövdesi boyunca tutma denetimi.
+   * Gövde aktifken ilgili lane'lerden en az biri basılı olmalıdır; aksi halde
+   * "relay" ve "continuation" combo olayları kaçırılmış (MISS) sayılır.
    */
-  private processSlideEvents(songTime: number) {
-    for (const event of this.slideEvents) {
-      if (event.judged) continue;
-      if (event.time > songTime) break; // olaylar zamana göre sıralı
-      if (!this.judged[event.parent]) continue; // baş henüz çözülmedi
-      event.judged = true;
-      this.registerJudgment(this.headHit[event.parent] ? 'PERFECT' : 'MISS');
+  private processHolds(songTime: number) {
+    if (this.autoPlay) return;
+    for (let i = this.eventCursor; i < this.events.length; i++) {
+      const event = this.events[i];
+      if (event.time > songTime) break;
+      if (this.eventJudged[i] || !event.hold) continue;
+
+      const note = this.notes[event.noteIndex];
+      if (!note || note.type !== 'slide') continue;
+      const hold = this.holds.get(event.noteIndex);
+      if (!hold || hold.broken) {
+        // Tutma zaten kırılmışsa bu iç olay da kaçırılmıştır
+        this.eventJudged[i] = true;
+        this.registerJudgment('MISS');
+        continue;
+      }
+      // Baş vuruşu hiç yapılmadıysa gövde combo üretemez
+      if (!hold.hit) {
+        this.eventJudged[i] = true;
+        this.breakHold(event.noteIndex, songTime);
+        this.registerJudgment('MISS');
+        continue;
+      }
+      // Gövde bu anda aktifse lane basılı mı kontrol et
+      if (songTime >= note.time && songTime <= (note.endTime ?? note.time) + RELEASE_GRACE) {
+        if (!this.anySlideLaneHeld(note)) {
+          this.eventJudged[i] = true;
+          this.breakHold(event.noteIndex, songTime);
+          this.registerJudgment('MISS');
+          continue;
+        }
+      }
+      // Lane basılıysa veya gövde henüz başlamadıysa otomatik PERFECT
+      this.eventJudged[i] = true;
+      this.registerJudgment('PERFECT');
     }
+    this.advanceEventCursor();
+  }
+
+  /** Slide gövdesinin geçtiği lane'lerden herhangi biri basılı mı. */
+  private anySlideLaneHeld(note: Note): boolean {
+    if (!note.points || note.points.length === 0) return this.isLaneHeld(note.lane);
+    for (const point of note.points) {
+      if (this.isLaneHeld(point.lane)) return true;
+    }
+    return false;
   }
 
   private loop = () => {
@@ -358,7 +527,7 @@ export class GameEngine {
     const songTime = this.getSongTime();
     this.updateMisses(songTime);
     if (this.autoPlay) this.updateAutoPlay(songTime);
-    this.processSlideEvents(songTime);
+    else this.processHolds(songTime);
     this.render(songTime);
 
     const finished = this.chart.notes.length > 0 && songTime > this.chart.duration + 1.5;
@@ -377,8 +546,9 @@ export class GameEngine {
       this.rafId = null;
     }
     const accuracy = this.judgedCount === 0 ? 100 : (this.weightSum / this.judgedCount) * 100;
+    const comboTotal = Math.max(this.events.length || this.notes.length, 1);
     console.log(
-      `Bitti! Skor: ${this.score} | İsabet: ${accuracy.toFixed(2)}% | Max kombo: ${this.maxCombo} | Nota: ${this.judgedCount}/${this.comboTotal}`
+      `Bitti! Skor: ${this.score} | İsabet: ${accuracy.toFixed(2)}% | Max kombo: ${this.maxCombo} | Nota: ${this.judgedCount}/${comboTotal}`
     );
     const menu = document.getElementById('menu');
     if (menu) menu.style.display = 'flex';
@@ -390,7 +560,7 @@ export class GameEngine {
       score: this.score,
       accuracy,
       maxCombo: this.maxCombo,
-      totalNotes: this.comboTotal,
+      totalNotes: comboTotal,
     });
   }
 
@@ -404,7 +574,11 @@ export class GameEngine {
     }
     window.removeEventListener('resize', this.handleResize);
     window.removeEventListener('keydown', this.handleKeyDown);
+    window.removeEventListener('keyup', this.handleKeyUp);
+    window.removeEventListener('blur', this.handleBlur);
     this.canvas.removeEventListener('pointerdown', this.handlePointerDown);
+    window.removeEventListener('pointerup', this.handlePointerUp);
+    window.removeEventListener('pointercancel', this.handlePointerUp);
     if (this.audio) {
       this.audio.pause();
       this.audio = null;
@@ -450,6 +624,36 @@ export class GameEngine {
       ctx.stroke();
     }
 
+    // Kanal 9 guide varlıkları: görsel rehber çizgileri (puanlanmaz)
+    for (const guide of this.guides) {
+      if (guide.points.length < 2) continue;
+      const alpha = guide.critical ? 0.16 : 0.11;
+      ctx.strokeStyle = guide.critical ? `rgba(255, 230, 0, ${alpha})` : `rgba(0, 255, 102, ${alpha})`;
+      ctx.lineWidth = Math.max(laneWidth * 0.22, 4 * this.scale);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      guide.points.forEach((point, index) => {
+        const y = fieldBottom - (point.time - songTime) * PIXELS_PER_SECOND * this.noteSpeed * this.scale;
+        const x = this.fieldLeft + point.lane * laneWidth + laneWidth / 2;
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // Guide uçlarında küçük işaretler
+      ctx.fillStyle = guide.critical ? 'rgba(255, 230, 0, 0.5)' : 'rgba(0, 255, 102, 0.5)';
+      for (const point of [guide.points[0], guide.points[guide.points.length - 1]]) {
+        const y = fieldBottom - (point.time - songTime) * PIXELS_PER_SECOND * this.noteSpeed * this.scale;
+        if (y < -40 * this.scale || y > canvas.height + 40 * this.scale) continue;
+        const x = this.fieldLeft + point.lane * laneWidth + laneWidth / 2;
+        const r = Math.max(laneWidth * 0.1, 3 * this.scale);
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
     // Notalar
     ctx.save();
     ctx.beginPath();
@@ -478,34 +682,58 @@ export class GameEngine {
       const color = NOTE_COLORS[note.type];
 
       if (note.endTime !== undefined) {
-        // Yana kayan slide gövdesi: başlangıçtan bitişe interpolasyon
+        // Slide gövdesi: gerçek gövde noktaları (shape step'leri dahil) boyunca çizilir
         const endLane = note.endLane ?? note.lane;
-        const dur = Math.max(note.endTime - note.time, 0.0001);
         const bodyW = Math.max(laneWidth * 0.3, width - laneWidth * 0.3);
         const headX = this.fieldLeft + note.lane * laneWidth + laneWidth / 2;
         const tailX = this.fieldLeft + endLane * laneWidth + laneWidth / 2;
-        const bodyAlpha = this.judged[i] ? 0.5 : 0.32;
-        ctx.fillStyle = note.type === 'slide'
-          ? `rgba(43, 255, 176, ${bodyAlpha})`
-          : `rgba(0, 255, 102, ${bodyAlpha + 0.03})`;
+        const hold = this.holds.get(i);
+        const broken = hold?.broken === true;
+        const active = hold?.hit === true && !broken;
+        const bodyAlpha = broken ? 0.18 : active ? 0.62 : this.judged[i] ? 0.5 : 0.32;
+
+        const bodyPath: Array<{ lane: number; time?: number }> =
+          note.points && note.points.length >= 2
+            ? note.points
+            : [{ lane: note.lane }, { lane: endLane }];
+        const pointX = (lane: number) => this.fieldLeft + lane * laneWidth + laneWidth / 2;
+        const pointY = (time: number) =>
+          fieldBottom - (time - songTime) * PIXELS_PER_SECOND * this.noteSpeed * this.scale;
+
         ctx.beginPath();
-        ctx.moveTo(headX - bodyW / 2, y);
-        ctx.lineTo(headX + bodyW / 2, y);
-        ctx.lineTo(tailX + bodyW / 2, endY);
-        ctx.lineTo(tailX - bodyW / 2, endY);
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = note.type === 'slide' ? 'rgba(180, 255, 235, 0.55)' : 'rgba(186, 255, 205, 0.55)';
+        bodyPath.forEach((point, index) => {
+          const px = pointX(point.lane);
+          // points dizisinde zaman her zaman tanımlıdır; yedek yol için baş/son kullanılır
+          const py = point.time !== undefined ? pointY(point.time) : index === 0 ? y : endY;
+          if (index === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        });
+        // İnce gövde çizgisi (düz interpolasyon yerine gerçek şekil)
+        ctx.strokeStyle = broken
+          ? 'rgba(255, 77, 77, 0.55)'
+          : note.type === 'slide'
+            ? `rgba(43, 255, 176, ${bodyAlpha})`
+            : `rgba(0, 255, 102, ${bodyAlpha + 0.03})`;
+        ctx.lineWidth = bodyW;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.stroke();
+
+        ctx.strokeStyle = broken
+          ? 'rgba(255, 140, 140, 0.6)'
+          : note.type === 'slide'
+            ? 'rgba(180, 255, 235, 0.55)'
+            : 'rgba(186, 255, 205, 0.55)';
         ctx.lineWidth = 1.5 * this.scale;
         ctx.stroke();
 
-        // Görünür tikler: gövde üzerinde parlayan çizgiler
-        if (note.ticks && note.ticks.length > 0) {
+        // Gövde üzerindeki görünür tikler (tip 3) ve combo üreten relay noktaları
+        if (note.points && note.points.length > 0) {
           ctx.fillStyle = 'rgba(220, 255, 238, 0.92)';
-          for (const t of note.ticks) {
-            const p = Math.min(Math.max((t - note.time) / dur, 0), 1);
-            const tickX = headX + (tailX - headX) * p;
-            const tickY = fieldBottom - (t - songTime) * PIXELS_PER_SECOND * this.noteSpeed * this.scale;
+          for (const point of note.points) {
+            if (point.kind !== 'tick' && point.kind !== 'attach') continue;
+            const tickX = this.fieldLeft + point.lane * laneWidth + laneWidth / 2;
+            const tickY = fieldBottom - (point.time - songTime) * PIXELS_PER_SECOND * this.noteSpeed * this.scale;
             ctx.beginPath();
             ctx.roundRect(tickX - bodyW / 2, tickY - 3 * this.scale, bodyW, 6 * this.scale, 3 * this.scale);
             ctx.fill();

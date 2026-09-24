@@ -1,6 +1,21 @@
 export type NoteType = "tap" | "critical" | "trace" | "flick" | "damage" | "hold" | "slide";
 export type FlickDirection = "up" | "left" | "right";
 
+/** Slide gövdesindeki nokta çeşidi (referans: SlideStartPoint/RelayPoint/EndPoint). */
+export type SlidePointKind = "start" | "tick" | "step" | "attach" | "end";
+
+export interface SlidePoint {
+  time: number;
+  /** Ham tick değeri — continuation aralıklarını birebir hesaplamak için gerekli. */
+  tick: number;
+  lane: number;
+  width: number;
+  kind: SlidePointKind;
+  critical: boolean;
+  /** Bu nokta combo olayı üretiyor mu (görünür relay). */
+  combo: boolean;
+}
+
 export interface Note {
   id: string;
   /** Vuruş zamanı (saniye) */
@@ -20,8 +35,39 @@ export interface Note {
   endDirection?: FlickDirection;
   /** Kritik trace işareti (tip 6) */
   critical?: boolean;
-  /** Slide üstündeki görünür tikler (saniye) */
-  ticks?: number[];
+  /** Slide gövdesinin tüm noktaları (başlangıç -> bitiş, görünür ve görünmez adımlar). */
+  points?: SlidePoint[];
+  /** Baş vuruşu puanlanıyor mu (hidden hold -> judgeType "none"). */
+  judgeStart?: boolean;
+  /** Bitiş vuruşu puanlanıyor mu. */
+  judgeEnd?: boolean;
+  /** Slide yönü puanlanıyor mu (friction -> judgeType "trace"). */
+  judgeTrace?: boolean;
+  /** Tutma sırasında otomatik yarım-beat combo olayları (saniye). */
+  continuations?: number[];
+}
+
+/** Kanal 9 "guide" varlığı: yalnızca görsel, puanlanmaz (referans: Guide). */
+export interface GuideNote {
+  id: string;
+  critical: boolean;
+  points: Array<{ time: number; lane: number; width: number }>;
+}
+
+export type ComboEventKind = "single" | "start" | "relay" | "continuation" | "end";
+
+/**
+ * Combo olayları takım zaman sırasına göre üretilir.
+ * `input` olanlar oyuncunun vuruşunu, `hold` olanlar aktif tutmayı gerektirir.
+ */
+export interface ComboEvent {
+  time: number;
+  kind: ComboEventKind;
+  critical: boolean;
+  /** chart.notes içindeki indeks. */
+  noteIndex: number;
+  input: boolean;
+  hold: boolean;
 }
 
 export interface BPMChange {
@@ -41,6 +87,10 @@ export interface ParsedChart {
   bpm: number;
   ticksPerBeat: number;
   notes: Note[];
+  /** Kanal 9 guide varlıkları (görsel, combo dışı). */
+  guides: GuideNote[];
+  /** Zaman sırasına göre tüm combo olayları (referans combo_events ile birebir). */
+  comboEvents: ComboEvent[];
   bpmChanges: BPMChange[];
   /** Son notanın bitiş zamanı (saniye) */
   duration: number;
@@ -214,10 +264,11 @@ export function parseSUS(content: string): ParsedChart {
     return c.time + ((tick - c.tick) / ticksPerBeat) * (60 / c.bpm);
   };
 
-  // Kanal ayrıştırma: 1x kisa notalar, 5x air/yön, 3li slide akışları (9li guide gerekmediği için atlanır)
+  // Kanal ayrıştırma: 1x kısa notalar, 5x air/yön, 3li slide akışları, 9lu guide akışları
   const taps: RawNote[] = [];
   const airs: RawNote[] = [];
   const slideStreams = new Map<string, RawNote[]>();
+  const guideStreams = new Map<string, RawNote[]>();
 
   for (const line of headerLines) {
     const h = line.header;
@@ -237,13 +288,15 @@ export function parseSUS(content: string): ParsedChart {
         if (cell === "00") return;
         airs.push({ tick: toTick(measure, index, cells.length), rawLane, width: int36(cell[1]), type: int36(cell[0]) });
       });
-    } else if (h.length === 6 && h[3] === "3") {
+    } else if (h.length === 6 && (h[3] === "3" || h[3] === "9")) {
+      // 3 = slide/trace akışı, 9 = guide akışı (ikisi de aynı tip kodlarını kullanır)
       const rawLane = int36(h[4]);
       const id = h[5];
-      let stream = slideStreams.get(id);
+      const target = h[3] === "3" ? slideStreams : guideStreams;
+      let stream = target.get(id);
       if (!stream) {
         stream = [];
-        slideStreams.set(id, stream);
+        target.set(id, stream);
       }
       cells.forEach((cell, index) => {
         if (cell === "00") return;
@@ -252,7 +305,41 @@ export function parseSUS(content: string): ParsedChart {
     }
   }
 
-  // Air kanalı: 1=yukari, 3=sol, 4=sağ flick yönü (2/5/6 = slide easing, yoksayılır)
+  /** Bir akışı START(1)/END(2) sırasıyla böler; bitmemiş akışlar atılır. */
+  const splitStreams = (source: Map<string, RawNote[]>): RawNote[][] => {
+    const out: RawNote[][] = [];
+    for (const stream of source.values()) {
+      const sorted = [...stream].sort((a, b) => a.tick - b.tick);
+      let current: RawNote[] = [];
+      for (const note of sorted) {
+        current.push(note);
+        if (note.type === 2) {
+          if (current.length >= 2) out.push(current);
+          current = [];
+        }
+      }
+    }
+    return out;
+  };
+
+  /** Aynı başlangıç/bitiş (tick, lane) çiftini taşıyan akışları birleştirir. */
+  const dedupHolds = (holds: RawNote[][]): RawNote[][] => {
+    const seen = new Set<string>();
+    const result: RawNote[][] = [];
+    for (const hold of holds) {
+      if (hold.length < 2) continue;
+      const key = `${hold[0].tick}:${hold[0].rawLane}:${hold[hold.length - 1].tick}:${hold[hold.length - 1].rawLane}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(hold);
+    }
+    return result;
+  };
+
+  const keptSlides = dedupHolds(splitStreams(slideStreams));
+  const keptGuides = dedupHolds(splitStreams(guideStreams));
+
+  // Air kanalı: 1=yukari, 3=sol, 4=sağ flick yönü (2/5/6 = ease in/out, yoksayılır)
   const flickMap = new Map<string, FlickDirection>();
   for (const air of airs) {
     const key = `${air.tick}-${air.rawLane}`;
@@ -261,37 +348,34 @@ export function parseSUS(content: string): ParsedChart {
     else if (air.type === 4) flickMap.set(key, "right");
   }
 
-  // Slide akışları: sıra ile başla, tip 2 (END) de bitir; bitmemiş akışlar atılır
-  const keptSlides: RawNote[][] = [];
-  const slideSeen = new Set<string>();
-  for (const stream of slideStreams.values()) {
-    const sorted = [...stream].sort((a, b) => a.tick - b.tick);
-    let current: RawNote[] = [];
-    let startNew = true;
-    const groups: RawNote[][] = [];
-    for (const note of sorted) {
-      if (startNew) {
-        current = [];
-        startNew = false;
-      }
-      current.push(note);
-      if (note.type === 2) {
-        groups.push(current);
-        startNew = true;
-      }
-    }
-    for (const group of groups) {
-      if (group.length < 2) continue;
-      const first = group[0];
-      const last = group[group.length - 1];
-      const dedupKey = `${first.tick}:${first.rawLane}:${last.tick}:${last.rawLane}`;
-      if (slideSeen.has(dedupKey)) continue;
-      slideSeen.add(dedupKey);
-      keptSlides.push(group);
+  // Kısa nota işaretleri (referans sus loader ile birebir)
+  const criticals = new Set<string>();
+  const stepIgnore = new Set<string>();
+  const frictions = new Set<string>();
+  const hiddenHolds = new Set<string>();
+  for (const tap of taps) {
+    const key = `${tap.tick}-${tap.rawLane}`;
+    if (tap.type === 2) criticals.add(key);
+    else if (tap.type === 3) stepIgnore.add(key);
+    else if (tap.type === 5) frictions.add(key);
+    else if (tap.type === 6) {
+      criticals.add(key);
+      frictions.add(key);
+    } else if (tap.type === 7) hiddenHolds.add(key);
+    else if (tap.type === 8) {
+      hiddenHolds.add(key);
+      criticals.add(key);
     }
   }
 
-  // Kisa notalarla slide kesişimleri oyun tarafından birleştirilir
+  /** judgeType: hidden hold -> "none", friction -> "trace", aksi halde "normal". */
+  const judgeTypeOf = (key: string): "normal" | "trace" | "none" => {
+    if (hiddenHolds.has(key)) return "none";
+    if (frictions.has(key)) return "trace";
+    return "normal";
+  };
+
+  // Kısa notalarla slide kesişimleri oyun tarafından birleştirilir
   const slideKeys = new Set<string>();
   for (const group of keptSlides) for (const p of group) slideKeys.add(`${p.tick}-${p.rawLane}`);
 
@@ -302,9 +386,12 @@ export function parseSUS(content: string): ParsedChart {
   const sortedTaps = [...taps].sort((a, b) => a.tick - b.tick);
 
   for (const tap of sortedTaps) {
-    // 3 = slide step-ignore işareti, 4 = skill olayı, 7/8 = hidden-hold işareti (oyun tarafından oynanmaz)
-    if (tap.type === 3 || tap.type === 4 || tap.type === 7 || tap.type === 8) continue;
-    if (tap.rawLane < MIN_RAW_LANE || tap.rawLane > MAX_RAW_LANE || tap.rawLane === FEVER_RAW_LANE) continue;
+    // 4 = skill olayı (oyun notu değil), 15 = fever kanalı (combo dışı)
+    if (tap.type === 4) continue;
+    if (tap.rawLane === FEVER_RAW_LANE) continue;
+    // 3 = step-ignore işareti, 7/8 = hidden-hold işareti (oyun tarafından oynanmaz)
+    if (tap.type === 3 || tap.type === 7 || tap.type === 8) continue;
+    if (tap.rawLane < MIN_RAW_LANE || tap.rawLane > MAX_RAW_LANE) continue;
 
     const key = `${tap.tick}-${tap.rawLane}`;
     if (slideKeys.has(key)) continue;
@@ -312,8 +399,9 @@ export function parseSUS(content: string): ParsedChart {
     singleSeen.add(key);
 
     const direction = flickMap.get(key);
-    const type: NoteType =
-      tap.type === 2 ? "critical" : tap.type === 5 || tap.type === 6 ? "trace" : direction ? "flick" : "tap";
+    const isCritical = criticals.has(key);
+    const isFriction = frictions.has(key);
+    const type: NoteType = isCritical ? "critical" : isFriction ? "trace" : direction ? "flick" : "tap";
     const note: Note = {
       id: `note_${noteCounter++}`,
       time: tickToSeconds(tap.tick),
@@ -322,14 +410,19 @@ export function parseSUS(content: string): ParsedChart {
       type,
     };
     if (direction) note.direction = direction;
-    if (tap.type === 6) note.critical = true;
+    if (isCritical) note.critical = true;
     notes.push(note);
   }
 
-  // Slides -> tek bir uzun nota (başlangıçtan bitişe interpolasyon + görünür tikler)
+  // Slides -> tek bir uzun nota (gövde noktaları + combo üreten tikler)
   for (const group of keptSlides) {
     const first = group[0];
     const last = group[group.length - 1];
+    const startKey = `${first.tick}-${first.rawLane}`;
+    const startJudge = judgeTypeOf(startKey);
+    const endJudge = judgeTypeOf(`${last.tick}-${last.rawLane}`);
+    const isCritical = criticals.has(startKey);
+
     const note: Note = {
       id: `note_${noteCounter++}`,
       time: tickToSeconds(first.tick),
@@ -338,16 +431,69 @@ export function parseSUS(content: string): ParsedChart {
       type: "slide",
       endTime: tickToSeconds(last.tick),
       endLane: laneOf(last.rawLane),
+      critical: isCritical,
+      judgeStart: startJudge !== "none",
+      judgeEnd: endJudge !== "none",
+      judgeTrace: startJudge === "trace" || endJudge === "trace",
     };
     const endDirection = flickMap.get(`${last.tick}-${last.rawLane}`);
     if (endDirection) note.endDirection = endDirection;
-    const ticks = group.filter((p) => p.type === 3).map((p) => tickToSeconds(p.tick));
-    if (ticks.length > 0) note.ticks = ticks;
+
+    // Gövde noktaları: start / tick (tip 3) / step (tip 5) / attach / end
+    const points: SlidePoint[] = [];
+    for (const p of group) {
+      const key = `${p.tick}-${p.rawLane}`;
+      let kind: SlidePointKind;
+      let combo: boolean;
+      if (p.type === 1) {
+        kind = "start";
+        combo = true;
+      } else if (p.type === 2) {
+        kind = "end";
+        combo = true;
+      } else if (p.type === 3) {
+        // tip 3 + step-ignore -> "attach": şekil değiştirmez ama combo ekler
+        kind = stepIgnore.has(key) ? "attach" : "tick";
+        combo = true;
+      } else {
+        // tip 5 -> görünmez adım: şekli değiştirir, combo EKLEMEZ
+        kind = "step";
+        combo = false;
+      }
+      points.push({
+        time: tickToSeconds(p.tick),
+        tick: p.tick,
+        lane: laneOf(p.rawLane),
+        width: widthOf(p.width),
+        kind,
+        critical: isCritical,
+        combo,
+      });
+    }
+    note.points = points;
     notes.push(note);
+  }
+
+  // Guides (kanal 9): yalnızca görsel, combo dışı
+  const guides: GuideNote[] = [];
+  for (const group of keptGuides) {
+    const first = group[0];
+    guides.push({
+      id: `guide_${guides.length}`,
+      critical: criticals.has(`${first.tick}-${first.rawLane}`),
+      points: group.map((p) => ({
+        time: tickToSeconds(p.tick),
+        lane: laneOf(p.rawLane),
+        width: widthOf(p.width),
+      })),
+    });
   }
 
   notes.sort((a, b) => a.time - b.time);
   const duration = notes.reduce((max, note) => Math.max(max, note.endTime ?? note.time), 0);
+
+  const comboEvents = buildComboEvents(notes, ticksPerBeat, tickToSeconds);
+  comboEvents.sort((a, b) => a.time - b.time);
 
   return {
     title,
@@ -358,7 +504,115 @@ export function parseSUS(content: string): ParsedChart {
     bpm: bpmChanges[0]?.bpm ?? 120,
     ticksPerBeat,
     notes,
+    guides,
+    comboEvents,
     bpmChanges,
     duration,
   };
+}
+
+/**
+ * Referans `combo_events()` ile birebir aynı combo olaylarını üretir.
+ *
+ * Uzun nota (slide) olayları:
+ *   - start / end (judgeType "none" ise puanlanmaz)
+ *   - görünür relay'ler (tip 3) ve step-ignore "attach" relay'leri
+ *   - "long_continuations": yarım beat (240 tick) aralıklarla, tutma başladıktan
+ *     bitişe kadar otomatik combo üreten olaylar. Bunlar in-game komboyu
+ *     yükselten ve daha önce eksik kalan notalardır.
+ */
+function buildComboEvents(
+  notes: Note[],
+  ticksPerBeat: number,
+  tickToSeconds: (tick: number) => number
+): ComboEvent[] {
+  const events: ComboEvent[] = [];
+  const HALF_BEAT = Math.floor(ticksPerBeat / 2);
+
+  for (let index = 0; index < notes.length; index++) {
+    const note = notes[index];
+    if (note.type !== "slide" || !note.points || note.points.length === 0) {
+      events.push({
+        time: note.time,
+        kind: "single",
+        critical: Boolean(note.critical),
+        noteIndex: index,
+        input: true,
+        hold: false,
+      });
+      continue;
+    }
+
+    const points = note.points;
+    const startTick = points[0].tick;
+    const endTick = points[points.length - 1].tick;
+    let cursor = startTick + HALF_BEAT;
+    if (cursor % HALF_BEAT) cursor -= cursor % HALF_BEAT;
+    const hasTicks = cursor !== startTick && cursor !== endTick;
+
+    let prevJointSeen = false;
+    const flushContinuations = (upToTick: number) => {
+      if (!hasTicks || !prevJointSeen) return;
+      let adjusted = upToTick;
+      if (adjusted % HALF_BEAT) adjusted += HALF_BEAT - (adjusted % HALF_BEAT);
+      while (cursor < adjusted) {
+        events.push({
+          time: tickToSeconds(cursor),
+          kind: "continuation",
+          critical: Boolean(note.critical),
+          noteIndex: index,
+          input: false,
+          hold: true,
+        });
+        cursor += HALF_BEAT;
+      }
+    };
+
+    for (const point of points) {
+      if (point.kind === "start") {
+        if (note.judgeStart !== false) {
+          events.push({
+            time: point.time,
+            kind: "start",
+            critical: point.critical,
+            noteIndex: index,
+            input: true,
+            hold: false,
+          });
+        }
+        prevJointSeen = true;
+      } else if (point.kind === "end") {
+        if (note.judgeEnd !== false) {
+          events.push({
+            time: point.time,
+            kind: "end",
+            critical: point.critical,
+            noteIndex: index,
+            input: true,
+            hold: false,
+          });
+        }
+        flushContinuations(point.tick);
+      } else if (point.kind === "tick" || point.kind === "attach") {
+        if (point.combo) {
+          events.push({
+            time: point.time,
+            kind: "relay",
+            critical: point.critical,
+            noteIndex: index,
+            input: false,
+            hold: true,
+          });
+        }
+        // "attach" relay'leri prev_joint'i ilerletmez (referans davranışı)
+        if (point.kind === "tick") {
+          flushContinuations(point.tick);
+          prevJointSeen = true;
+        }
+      }
+      // "step" (tip 5): yalnızca şekli değiştirir, combo üretmez
+    }
+  }
+
+  return events;
 }
