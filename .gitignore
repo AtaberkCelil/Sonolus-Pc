@@ -8,3 +8,4 @@ menu/dist/
 .env
 .env.*
 !.env.example
+Gemini_Generated_Image_*.jpg

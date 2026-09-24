@@ -3,7 +3,6 @@ import {
   ChevronLeft,
   Grid2X2,
   Heart,
-  Home as HomeIcon,
   MoreHorizontal,
   Play,
   Search,
@@ -147,8 +146,8 @@ export default function Home() {
       <div className="backdrop-shade" aria-hidden="true" />
 
       <header className="topbar">
-        <button className="icon-button home-button" aria-label="Home" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
-          <HomeIcon size={28} strokeWidth={3} fill="currentColor" />
+        <button className="icon-button home-button" aria-label="Sonopc — back to top" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
+          <img className="brand-mark" src="/logo.svg" alt="Sonopc" width={34} height={34} />
         </button>
         <h1>Project Sekai Levels</h1>
         <button className="icon-button back-button" aria-label="Go back" onClick={() => window.history.back()}>
