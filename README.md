@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/logo.svg" width="140" alt="Sonopc logo" />
+  <img src="public/logo.jpg" width="220" alt="Sonopc logo" />
 </p>
 
 <h1 align="center">Sonopc</h1>

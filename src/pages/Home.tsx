@@ -147,7 +147,7 @@ export default function Home() {
 
       <header className="topbar">
         <button className="icon-button home-button" aria-label="Sonopc — back to top" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
-          <img className="brand-mark" src="/logo.svg" alt="Sonopc" width={34} height={34} />
+          <img className="brand-mark" src="/logo.jpg" alt="Sonopc" width={34} height={34} />
         </button>
         <h1>Project Sekai Levels</h1>
         <button className="icon-button back-button" aria-label="Go back" onClick={() => window.history.back()}>
