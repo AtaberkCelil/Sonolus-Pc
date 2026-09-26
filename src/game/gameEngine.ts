@@ -752,7 +752,18 @@ export class GameEngine {
         );
         ctx.fill();
         if (note.endDirection) {
-          this.drawNoteMarker(note.type, tailX, endY, bodyW, NOTE_HEIGHT * this.scale, note.endDirection, note.critical);
+          // Bitiş işareti kendi noktasının kritikliğini kullanır (uç, baş'tan
+          // bağımsız olarak kritik olabilir — referans `end_critical`).
+          const endPoint = note.points?.[note.points.length - 1];
+          this.drawNoteMarker(
+            note.type,
+            tailX,
+            endY,
+            bodyW,
+            NOTE_HEIGHT * this.scale,
+            note.endDirection,
+            endPoint?.critical ?? note.critical
+          );
         }
       }
 

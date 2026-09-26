@@ -10,11 +10,12 @@ async function startServer() {
   const app = express();
   const server = createServer(app);
 
-  // Serve static files from dist/public in production
-  const staticPath =
-    process.env.NODE_ENV === "production"
-      ? path.resolve(__dirname, "public")
-      : path.resolve(__dirname, "..", "dist");
+  // Vite builds everything (index.html, hashed assets, and the contents of
+  // public/) into dist/, so that is what we serve in both modes. STATIC_DIR is
+  // an escape hatch for unusual deploys.
+  const staticPath = process.env.STATIC_DIR
+    ? path.resolve(process.env.STATIC_DIR)
+    : path.resolve(__dirname, "..", "dist");
 
   app.use(express.static(staticPath));
 

@@ -59,6 +59,7 @@ Other scripts:
 ```bash
 pnpm check          # TypeScript type-check
 pnpm build          # production build → dist/
+pnpm verify:parity  # diff chart parsing against the reference converter
 pnpm preview        # serve the production build
 pnpm start          # serve the build with the bundled Node server
 ```
@@ -101,7 +102,9 @@ menu/                     # original standalone PC player (legacy)
 
 Combo counts are **note-for-note identical to the reference converter**
 ([UntitledCharts/sonolus-level-converters](https://github.com/UntitledCharts/sonolus-level-converters))
-on all 10 bundled charts — verified by running the reference loader against this parser:
+on all 10 bundled charts — reproduce it yourself with `pnpm verify:parity`
+(see [`tools/verify-parity/`](tools/verify-parity/)), which runs both parsers over
+the same files and fails on any difference:
 
 | Chart | Combo events | | Chart | Combo events |
 |---|---|---|---|---|
@@ -110,6 +113,10 @@ on all 10 bundled charts — verified by running the reference loader against th
 | TIVoHM Hard | 963 | | Mesmerizer Hard | 761 |
 | TIVoHM Expert | 1520 | | Mesmerizer Expert | 1218 |
 | TIVoHM Master | 1742 | | Mesmerizer Master | 1451 |
+
+That check compares more than the total — it also diffs the per-kind breakdown
+(`single` / `start` / `relay` / `continuation` / `end`), the critical split inside
+each kind, the playable note counts, the guide notes, and the chart duration.
 
 This required implementing the parts of the format that a naive parse drops:
 
@@ -120,8 +127,13 @@ This required implementing the parts of the format that a naive parse drops:
   the trace shape (adds nothing), and type `3` marked as *step-ignore* becomes an `attach`.
 - **`judgeType`** — hidden holds (channel `1` types `7`/`8`) are not judged, and friction
   slides (types `5`/`6`) are traced rather than tapped.
+- **Per-point criticality** — a slide's start and ticks inherit the slide's own
+  criticality, but its **end** is critical if *either* the slide or the endpoint is.
+  Getting this wrong still yields the right combo *count* with the wrong notes, which
+  is why the parity check compares the critical split and not just the totals.
 - **Guide channels (`9x`)** are parsed and rendered as translucent guide paths
   (yellow when critical, green otherwise). They are visual only and never add combo.
+  Mesmerizer ships 26 of them (78 points); TIVoHM has no channel-9 data.
 
 ## ✋ Hold & release detection
 

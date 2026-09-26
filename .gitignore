@@ -5,6 +5,7 @@ menu/dist/
 .manus-logs/
 *.log
 .DS_Store
+tools/verify-parity/.cache/
 .env
 .env.*
 !.env.example

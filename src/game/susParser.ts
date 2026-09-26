@@ -460,13 +460,18 @@ export function parseSUS(content: string): ParsedChart {
         kind = "step";
         combo = false;
       }
+      // Kritiklik her bağlantı noktasının KENDİ değerinden gelir:
+      //   - start / tick / step -> slide'ın kendi kritikliği
+      //   - end                  -> slide kritik VEYA uç noktanın kendi kritikliği
+      // Referans: sus/loader.py `end_critical = critical or (key in criticals)`
+      const pointCritical = kind === "end" ? isCritical || criticals.has(key) : isCritical;
       points.push({
         time: tickToSeconds(p.tick),
         tick: p.tick,
         lane: laneOf(p.rawLane),
         width: widthOf(p.width),
         kind,
-        critical: isCritical,
+        critical: pointCritical,
         combo,
       });
     }
